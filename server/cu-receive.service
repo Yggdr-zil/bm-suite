@@ -1,0 +1,31 @@
+# CU Benchmark Receiver — systemd service
+# Install:
+#   sudo cp cu-receive.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cu-receive
+#   sudo systemctl status cu-receive
+#
+# Logs:
+#   journalctl -fu cu-receive
+
+[Unit]
+Description=CU Benchmark Suite — Result Receiver
+After=network.target
+
+[Service]
+Type=simple
+User=bearj
+WorkingDirectory=/home/bearj/cu-bench
+ExecStart=/bin/bash /home/bearj/cu-bench/receive.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment overrides (edit these to match your layout)
+Environment=CU_INBOX=/home/bearj/cu-bench/inbox
+Environment=CU_ARCHIVE=/home/bearj/cu-bench/archive
+Environment=CU_LOGS=/home/bearj/cu-bench/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,62 @@
+# CU Benchmark Suite — Docker Compose
+# All required GPU flags are baked in here.
+#
+# Usage:
+#   docker compose up              # run benchmarks
+#   docker compose up --no-log-prefix   # cleaner output
+#
+# Configure in .env (auto-loaded by Compose):
+#   cp .env.example .env && nano .env
+#
+# Override at runtime:
+#   CU_QUICK=1 docker compose up
+#   CU_UPLOAD_DEST=user@host:/path docker compose up
+
+services:
+  cu-bench:
+    image: ${CU_IMAGE:-ghcr.io/yggdrasil-technologies/cu-bench:latest}
+
+    # ─── GPU access (equivalent to --gpus all) ───────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # ─── Required flags ───────────────────────────────────────────────────────
+    cap_add:
+      - SYS_ADMIN          # nvidia-smi clock locking
+
+    ipc: host              # NCCL shared memory for multi-GPU
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1           # pinned memory for NCCL all-reduce
+
+    # ─── Volumes ──────────────────────────────────────────────────────────────
+    volumes:
+      - ${CU_RESULTS_DIR:-./results}:/results
+      # Uncomment for inference benchmark:
+      # - ${CU_BENCH_MODEL_DIR:-/data/models}:/models
+      # For rsync upload: set SSH_KEY_PATH in .env and uncomment:
+      # - ${SSH_KEY_PATH}:/root/.ssh/id_bench:ro
+      # Alternatively: set CU_UPLOAD_KEY=base64key in .env (no mount needed)
+
+    # ─── Environment (reads from .env automatically) ──────────────────────────
+    environment:
+      - CU_UPLOAD_DEST=${CU_UPLOAD_DEST:-}
+      - CU_UPLOAD_WEBHOOK=${CU_UPLOAD_WEBHOOK:-}
+      - CU_UPLOAD_KEY=${CU_UPLOAD_KEY:-}
+      - CU_UPLOAD_KEY_TYPE=${CU_UPLOAD_KEY_TYPE:-ed25519}
+      - CU_QUICK=${CU_QUICK:-}
+      - CU_GPU_CLOCK=${CU_GPU_CLOCK:-}
+      - CU_BENCH_MODEL=${CU_BENCH_MODEL:-}
+      - CU_BENCH_MODEL_DIR=${CU_BENCH_MODEL_DIR:-/models}
+      - CU_GEMM_ITERS=${CU_GEMM_ITERS:-}
+      - CU_MEMBW_ITERS=${CU_MEMBW_ITERS:-}
+
+    # Container is removed automatically after exit (equivalent to --rm)
+    restart: "no"
