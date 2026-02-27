@@ -28,28 +28,30 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV RESULTS_DIR=/results
 ENV CU_BENCH_MODEL_DIR=/models
 # Upload configuration (set at runtime — do NOT bake credentials into image)
-ENV CU_UPLOAD_DEST=""
-ENV CU_UPLOAD_WEBHOOK=""
-ENV CU_UPLOAD_KEY=""
-ENV CU_UPLOAD_KEY_TYPE="ed25519"
+# hadolint ignore=DL3048
+ENV CU_UPLOAD_DEST="" \
+    CU_UPLOAD_WEBHOOK="" \
+    CU_UPLOAD_KEY="" \
+    CU_UPLOAD_KEY_TYPE="ed25519"
 
 # ─── System dependencies ───
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false update \
+    && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     git wget curl jq numactl \
     openssh-client rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Python packages ───
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir \
     rich matplotlib numpy plotext
 
 # PyTorch — let pip resolve CUDA-compatible version
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir \
     torch --index-url https://download.pytorch.org/whl/cu128
 
 # vLLM for inference benchmark (optional)
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir \
     vllm || echo "WARNING: vLLM install failed — inference benchmark will be skipped"
 
 # ─── NCCL tests for interconnect benchmark ───

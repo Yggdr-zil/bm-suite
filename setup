@@ -1,0 +1,87 @@
+#!/bin/bash
+# CU Benchmark Suite — Setup
+# Installs Python dependencies and creates the bench-run convenience command.
+# Called automatically by bootstrap.sh after clone.
+#
+# Can also be run standalone to repair or update an existing install:
+#   bash setup
+set -euo pipefail
+
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+BENCH_DIR="${INSTALL_DIR}/bench"
+
+echo ""
+echo "================================================================"
+echo "  CU Benchmark Suite — Setup"
+echo "  Install dir: ${INSTALL_DIR}"
+echo "================================================================"
+echo ""
+
+# ── Python dependencies ────────────────────────────────────────────────────
+echo "  Installing Python dependencies..."
+PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || echo "")
+if [ -z "$PIP" ]; then
+    echo "  ERROR: pip not found. Install Python 3.10+ first."
+    exit 1
+fi
+
+# Most H100 rental images have PyTorch pre-installed; we just need the extras.
+# --break-system-packages: needed on Ubuntu 22.04+ with externally-managed Python.
+# Fallback without it in case it's not supported (older images).
+$PIP install --quiet --break-system-packages rich matplotlib plotext 2>/dev/null \
+    || $PIP install --quiet rich matplotlib plotext
+
+echo "  [OK] rich, matplotlib, plotext installed"
+
+# ── bench-run convenience wrapper ──────────────────────────────────────────
+# Creates bench-run in /usr/local/bin (datacenter instances typically allow this)
+# or ~/.local/bin as fallback.
+BENCH_RUN_SCRIPT="${INSTALL_DIR}/bench-run"
+cat > "$BENCH_RUN_SCRIPT" <<WRAPPER
+#!/bin/bash
+# bench-run: shorthand for the CU benchmark suite
+exec bash "${BENCH_DIR}/run_all.sh" "\$@"
+WRAPPER
+chmod +x "$BENCH_RUN_SCRIPT"
+
+if install -m 0755 "$BENCH_RUN_SCRIPT" /usr/local/bin/bench-run 2>/dev/null; then
+    echo "  [OK] bench-run → /usr/local/bin/bench-run"
+else
+    mkdir -p "${HOME}/.local/bin"
+    install -m 0755 "$BENCH_RUN_SCRIPT" "${HOME}/.local/bin/bench-run"
+    echo "  [OK] bench-run → ~/.local/bin/bench-run"
+    if ! echo "$PATH" | grep -q "${HOME}/.local/bin"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
+        export PATH="${HOME}/.local/bin:${PATH}"
+        echo "  Added ~/.local/bin to PATH (reload: source ~/.bashrc)"
+    fi
+fi
+
+# ── .env from environment ──────────────────────────────────────────────────
+# If CU_* upload vars are already set (passed by bootstrap), write them to .env
+# so future runs of bench-run pick them up without needing to re-export.
+ENV_FILE="${INSTALL_DIR}/.env"
+if [ ! -f "$ENV_FILE" ] && [ -f "${INSTALL_DIR}/.env.example" ]; then
+    cp "${INSTALL_DIR}/.env.example" "$ENV_FILE"
+    for var in CU_UPLOAD_DEST CU_UPLOAD_WEBHOOK CU_UPLOAD_KEY SSH_KEY_PATH CU_RESULTS_DIR; do
+        val="${!var:-}"
+        if [ -n "$val" ] && grep -q "^${var}=" "$ENV_FILE"; then
+            sed -i "s|^${var}=.*|${var}=${val}|" "$ENV_FILE"
+        fi
+    done
+    echo "  [OK] .env written from environment"
+elif [ -f "$ENV_FILE" ]; then
+    echo "  [OK] .env already exists (skipped)"
+fi
+
+echo ""
+echo "================================================================"
+echo "  Setup complete."
+echo ""
+echo "  Run benchmarks:"
+echo "    bench-run              # full suite (~45 min on H100)"
+echo "    CU_QUICK=1 bench-run   # quick validation (~5 min)"
+echo ""
+echo "  Results land in: ${INSTALL_DIR}/results/"
+echo "================================================================"
+echo ""
