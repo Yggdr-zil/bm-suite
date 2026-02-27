@@ -1,9 +1,63 @@
 # CU Benchmark Suite v1.0
 
-Standardized GPU/accelerator benchmark suite for the Compute Unit (CU) Index.
+Standardized GPU/accelerator benchmark suite for the [Compute Unit (CU) Index](https://github.com/Yggdr-zil/cfm-platform).
 Physically measures performance specs from hardware — does not trust published numbers.
 
 Supports NVIDIA (cuda/nvidia-smi) and AMD (rocm/rocm-smi) with auto-detection.
+
+## Quick Start
+
+### Deploy to a cloud GPU instance (recommended)
+
+Requires a GPU instance with CUDA and Python pre-installed (Lambda Labs, CoreWeave, RunPod, Vast.ai, AWS Deep Learning AMI, etc.).
+
+```bash
+# 1. Bootstrap — installs deps and bench-run command (~30 seconds)
+bash <(curl -fsSL https://raw.githubusercontent.com/Yggdr-zil/bm-suite/main/bootstrap.sh)
+
+# 2. Run
+bench-run              # full suite (~45 min on H100)
+CU_QUICK=1 bench-run   # quick validation (~5 min)
+```
+
+Results land in `~/cu-bench/results/run_{timestamp}/`.
+
+### Auto-upload results to your server
+
+Pass upload credentials before bootstrapping and results will rsync to your
+server automatically when the run finishes — before the instance is terminated.
+
+```bash
+CU_UPLOAD_DEST=user@yourserver:/data/cu-inbox/ \
+CU_UPLOAD_KEY=$(base64 -w0 ~/.ssh/id_bench) \
+bash <(curl -fsSL https://raw.githubusercontent.com/Yggdr-zil/bm-suite/main/bootstrap.sh)
+```
+
+Or pipe from your local machine (credentials never touch the remote):
+
+```bash
+CU_UPLOAD_DEST=user@yourserver:/data/cu-inbox/ \
+CU_UPLOAD_KEY=$(base64 -w0 ~/.ssh/id_bench) \
+ssh ubuntu@<instance-ip> 'bash -s' < bootstrap.sh
+```
+
+### Docker (for raw instances without PyTorch pre-installed)
+
+```bash
+docker run --rm --gpus all --cap-add=SYS_ADMIN \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -v ./results:/results \
+  ghcr.io/yggdr-zil/cu-bench:latest
+
+# Quick mode:
+docker run --rm --gpus all --cap-add=SYS_ADMIN \
+  --ipc=host --ulimit memlock=-1:-1 \
+  -e CU_QUICK=1 \
+  -v ./results:/results \
+  ghcr.io/yggdr-zil/cu-bench:latest
+```
+
+---
 
 ## What It Measures
 
@@ -29,9 +83,9 @@ Both feed into the CU scoring formulas.
 [Preflight] → [Telemetry] → [Warmup] → [Benchmarks 1-5] → [Unlock] → [Report]
 ```
 
-1. **Preflight** (`preflight.sh`) — Auto-detects platform (NVIDIA/AMD), discovers hardware
-   specs dynamically, locks GPU clocks + memory clocks + power limit for deterministic
-   results, checks for clean GPU, writes `00_environment.json`.
+1. **Preflight** (`preflight.py`) — Auto-detects platform (NVIDIA/AMD), discovers hardware
+   specs dynamically, sets fans, enables persistence mode, checks for clean GPU,
+   writes `00_environment.json`.
 
 2. **Telemetry** (`telemetry.sh`) — Background process logging temp/power/clocks every
    second to CSV. Runs for the entire benchmark duration. Proves thermal and power
@@ -237,7 +291,7 @@ bm-suite/
 ├── HARDWARE_COMMANDS.md       ← NVIDIA vs AMD command reference (discover/lock/monitor/unlock)
 ├── bench/
 │   ├── _common.py             ← shared runtime: RUN_ID, RESULTS_DIR, write_result(), VRAM budget
-│   ├── preflight.sh           ← [0] detect platform, discover specs, lock clocks/power
+│   ├── preflight.py           ← [0] detect platform, discover specs, lock clocks/power
 │   ├── telemetry.sh           ← [1] background temp/power/clock CSV logger (1 Hz)
 │   ├── thermal_gate.py        ← [2] sustained GEMM until thermal steady state
 │   ├── gemm.py                ← [3] FP32/FP16/BF16/FP8 throughput via matrix multiply
