@@ -13,6 +13,15 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
+# Load .env from private repo root (two levels up from bench/)
+REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+if [ -f "${REPO_ROOT}/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${REPO_ROOT}/.env"
+    set +a
+fi
+
 # Detect GPU count
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)}"
 if [ "${NUM_GPUS:-0}" -eq 0 ]; then
