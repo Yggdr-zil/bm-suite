@@ -39,6 +39,7 @@ for i in $(seq 0 $((NUM_GPUS - 1))); do
     echo "  Launching GPU $i → $GPU_DIR"
     CUDA_VISIBLE_DEVICES=$i \
     RESULTS_DIR="$GPU_DIR" \
+    PYTHONUNBUFFERED=1 \
         bash "${SCRIPT_DIR}/run_all.sh" \
         > "${RUN_BASE}/gpu${i}.log" 2>&1 &
     PIDS+=($!)
