@@ -18,9 +18,7 @@
 #   CU_BENCH_MODEL       — model name/path for inference (optional)
 #   CU_BENCH_MODEL_DIR   — directory containing model weights (default: /models)
 #   CU_GEMM_DIM          — GEMM matrix dimension (default: 8192)
-#   CU_GEMM_ITERS        — GEMM measured iterations (default: 10000)
-#   CU_MEMBW_ITERS       — membw measured iterations (default: 5000)
-#   CU_QUICK             — set to 1 for fast mode (1000/500 iters)
+#   CU_GEMM_ITERS        — GEMM measured iterations (default: 200)
 #   CU_GPU_CLOCK         — override: skip sustained clock detection, use this freq
 #   CU_MEM_CLOCK         — override: lock mem clock to this freq
 set -uo pipefail
@@ -46,29 +44,14 @@ echo "  $(date -u)"
 echo "  Output: $RUN_DIR"
 echo "================================================================"
 
-# ─── Stage events CSV ───
-STAGE_EVENTS="${RUN_DIR}/stage_events.csv"
-echo "timestamp_utc,stage_name,event,exit_code" > "$STAGE_EVENTS"
-
-log_stage_event() {
-    # Usage: log_stage_event <stage_name> <start|end> [exit_code]
-    local ts exit_code="${3:-0}"
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
-    echo "${ts},${1},${2},${exit_code}" >> "$STAGE_EVENTS"
-}
-
 # Helper: run a benchmark step, log failures but keep going
 run_step() {
     local step_name="$1"
     shift
-    log_stage_event "$step_name" "start"
     if "$@"; then
-        log_stage_event "$step_name" "end" "0"
         echo "  [OK] $step_name"
     else
-        local ec=$?
-        log_stage_event "$step_name" "end" "$ec"
-        echo "  [FAIL] $step_name (exit code $ec)"
+        echo "  [FAIL] $step_name (exit code $?)"
         FAILED+=("$step_name")
     fi
 }
@@ -145,18 +128,9 @@ run_step "inference" python3 "${SCRIPT_DIR}/inference.py"
 echo -e "\nCompiling final report..."
 run_step "report" python3 "${SCRIPT_DIR}/report.py"
 
-# ─── Auto-plot (PNG + HTML) ───
-echo -e "\nGenerating plots..."
-run_step "plot" python3 "${SCRIPT_DIR}/plot.py"
-
-# ─── Upload results (before terminal pause, so data is safe first) ───
-if [ -n "${CU_UPLOAD_DEST:-}" ] || [ -n "${CU_UPLOAD_WEBHOOK:-}" ]; then
-    bash "${SCRIPT_DIR}/upload.sh"
-fi
-
-# ─── Terminal visualization (pauses for 'q' — data already sent) ───
-echo -e "\nRendering terminal charts..."
-python3 "${SCRIPT_DIR}/plot_terminal.py" || true
+# ─── Upload Results ───
+echo -e "\nUploading results..."
+run_step "upload" bash "${SCRIPT_DIR}/upload.sh"
 
 # ─── Fix ownership if run with sudo ───
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -171,8 +145,4 @@ else
     echo "  COMPLETE — ${#FAILED[@]} benchmark(s) failed: ${FAILED[*]}"
 fi
 echo "  Results: $RUN_DIR/benchmark_report.json"
-echo "  Plots:   $RUN_DIR/plots/summary.html"
-if [ -n "${CU_UPLOAD_DEST:-}" ]; then
-    echo "  Upload:  ${CU_UPLOAD_DEST}"
-fi
 echo "================================================================"
