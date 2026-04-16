@@ -1,63 +1,9 @@
 # CU Benchmark Suite v1.0
 
-Standardized GPU/accelerator benchmark suite for the [Compute Unit (CU) Index](https://github.com/Yggdr-zil/cfm-platform).
+Standardized GPU/accelerator benchmark suite for the Compute Unit (CU) Index.
 Physically measures performance specs from hardware — does not trust published numbers.
 
 Supports NVIDIA (cuda/nvidia-smi) and AMD (rocm/rocm-smi) with auto-detection.
-
-## Quick Start
-
-### Deploy to a cloud GPU instance (recommended)
-
-Requires a GPU instance with CUDA and Python pre-installed (Lambda Labs, CoreWeave, RunPod, Vast.ai, AWS Deep Learning AMI, etc.).
-
-```bash
-# 1. Bootstrap — installs deps and bench-run command (~30 seconds)
-bash <(curl -fsSL https://raw.githubusercontent.com/Yggdr-zil/bm-suite/main/bootstrap.sh)
-
-# 2. Run
-bench-run              # full suite (~45 min on H100)
-CU_QUICK=1 bench-run   # quick validation (~5 min)
-```
-
-Results land in `~/cu-bench/results/run_{timestamp}/`.
-
-### Auto-upload results to your server
-
-Pass upload credentials before bootstrapping and results will rsync to your
-server automatically when the run finishes — before the instance is terminated.
-
-```bash
-CU_UPLOAD_DEST=user@yourserver:/data/cu-inbox/ \
-CU_UPLOAD_KEY=$(base64 -w0 ~/.ssh/id_bench) \
-bash <(curl -fsSL https://raw.githubusercontent.com/Yggdr-zil/bm-suite/main/bootstrap.sh)
-```
-
-Or pipe from your local machine (credentials never touch the remote):
-
-```bash
-CU_UPLOAD_DEST=user@yourserver:/data/cu-inbox/ \
-CU_UPLOAD_KEY=$(base64 -w0 ~/.ssh/id_bench) \
-ssh ubuntu@<instance-ip> 'bash -s' < bootstrap.sh
-```
-
-### Docker (for raw instances without PyTorch pre-installed)
-
-```bash
-docker run --rm --gpus all --cap-add=SYS_ADMIN \
-  --ipc=host --ulimit memlock=-1:-1 \
-  -v ./results:/results \
-  ghcr.io/yggdr-zil/cu-bench:latest
-
-# Quick mode:
-docker run --rm --gpus all --cap-add=SYS_ADMIN \
-  --ipc=host --ulimit memlock=-1:-1 \
-  -e CU_QUICK=1 \
-  -v ./results:/results \
-  ghcr.io/yggdr-zil/cu-bench:latest
-```
-
----
 
 ## What It Measures
 
@@ -83,9 +29,9 @@ Both feed into the CU scoring formulas.
 [Preflight] → [Telemetry] → [Warmup] → [Benchmarks 1-5] → [Unlock] → [Report]
 ```
 
-1. **Preflight** (`preflight.py`) — Auto-detects platform (NVIDIA/AMD), discovers hardware
-   specs dynamically, sets fans, enables persistence mode, checks for clean GPU,
-   writes `00_environment.json`.
+1. **Preflight** (`preflight.sh`) — Auto-detects platform (NVIDIA/AMD), discovers hardware
+   specs dynamically, locks GPU clocks + memory clocks + power limit for deterministic
+   results, checks for clean GPU, writes `00_environment.json`.
 
 2. **Telemetry** (`telemetry.sh`) — Background process logging temp/power/clocks every
    second to CSV. Runs for the entire benchmark duration. Proves thermal and power
@@ -96,14 +42,13 @@ Both feed into the CU scoring formulas.
    higher than sustained — this eliminates that variable.
 
 4. **GEMM** (`gemm.py`) — Square matrix multiply (default 8192x8192) at each precision.
-   20 warmup iterations (primes cuBLAS auto-tuner), 10,000 measured iterations.
+   10 warmup iterations (primes cuBLAS auto-tuner), 100 measured iterations.
    TFLOPS = 2 * M * N * K / time / 1e12. Tests tensor cores (FP16/BF16/FP8) and
-   CUDA cores (FP32) separately. Stores timing percentiles + sampled drift series.
+   CUDA cores (FP32) separately.
 
 5. **Memory Bandwidth** (`membw.py`) — Tensor clone (read+write = 2x tensor size) and
    element-wise multiply (read A + read B + write C = 3x). Tests at 10% and 25% of
-   VRAM to ensure we exceed L2 cache and hit main memory. 5,000 iterations with
-   trimmed-mean aggregation and sampled bandwidth drift series.
+   VRAM to ensure we exceed L2 cache and hit main memory.
 
 6. **VRAM** (`vram.py`) — Binary search allocation (30 iterations) finds the true
    allocatable ceiling. Adds CUDA context overhead back in — the runtime's memory is
@@ -117,13 +62,7 @@ Both feed into the CU scoring formulas.
    gracefully if vLLM or model weights aren't available.
 
 9. **Report** (`report.py`) — Merges all JSON results into `benchmark_report.json`
-   with a SHA256 integrity hash. Loads `telemetry.csv` + `stage_events.csv` to
-   compute per-stage thermal profiles and detect throttle events.
-
-10. **Plot** (`plot.py`) — Auto-generates PNG charts and `plots/summary.html` from
-    the report: telemetry overview (temp/power/clock with stage boundaries), GEMM TFLOPS
-    bars, timing drift series per precision, membw bars + drift, VRAM breakdown,
-    interconnect sweep curve.
+   with a SHA256 integrity hash. Flat summary of primary measurements for easy parsing.
 
 ### Why Lock the Hardware
 
@@ -217,16 +156,8 @@ python3 bench/find_sustained_clock.py
 
 ```bash
 docker build -t cu-bench .
-docker run --gpus all --cap-add=SYS_ADMIN \
-  --ipc=host --ulimit memlock=-1:-1 \
+docker run --gpus all \
   -v /path/to/models:/models \
-  -v /path/to/results:/results \
-  cu-bench
-
-# Quick mode (faster, fewer iterations — for validation):
-docker run --gpus all --cap-add=SYS_ADMIN \
-  --ipc=host --ulimit memlock=-1:-1 \
-  -e CU_QUICK=1 \
   -v /path/to/results:/results \
   cu-bench
 ```
@@ -236,19 +167,12 @@ docker run --gpus all --cap-add=SYS_ADMIN \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RESULTS_DIR` | `./results/run_{timestamp}` | Output directory for benchmark results |
-| `CU_QUICK` | (unset) | Set to `1` for fast mode (1000 GEMM / 500 membw iters) |
 | `CU_VRAM_BUDGET` | `0.90` | Max fraction of free VRAM to use (safety cap) |
 | `CU_GEMM_DIM` | `8192` | GEMM matrix dimension (use 4096 for small GPUs) |
-| `CU_GEMM_ITERS` | `10000` | GEMM measured iterations (CU_QUICK → 1000) |
-| `CU_GEMM_WARMUP` | `20` | GEMM warmup iterations |
-| `CU_GEMM_TRIM_PCT` | `5` | % of slowest samples to trim from GEMM mean |
-| `CU_MEMBW_ITERS` | `5000` | Memory bandwidth measured iterations (CU_QUICK → 500) |
-| `CU_MEMBW_WARMUP` | `10` | membw warmup iterations |
-| `CU_MEMBW_TRIM_PCT` | `5` | % of slowest samples to trim from membw mean |
-| `CU_WARMUP_MIN_SECS` | `300` | Min thermal soak time (5 min mandatory floor) |
-| `CU_WARMUP_MAX_SECS` | `600` | Max thermal warmup time |
-| `CU_GPU_CLOCK` | (none) | Override sustained clock detection, lock to this MHz |
-| `CU_MEM_CLOCK` | (none) | Override memory clock lock MHz |
+| `CU_GEMM_ITERS` | `100` | GEMM measured iterations |
+| `CU_GEMM_WARMUP` | `10` | GEMM warmup iterations |
+| `CU_MEMBW_ITERS` | `100` | Memory bandwidth measured iterations |
+| `CU_WARMUP_MAX_SECS` | `300` | Max thermal warmup time before giving up |
 | `CU_BENCH_MODEL` | (none) | Model name/path for inference benchmark |
 | `CU_BENCH_MODEL_DIR` | `/models` | Directory containing model weights |
 | `CU_BENCH_INPUT_LEN` | `512` | Inference benchmark input token length |
@@ -277,9 +201,8 @@ Every JSON result file includes a `_meta` block for provenance:
 The final `benchmark_report.json` merges all benchmarks and includes:
 - `measured_specs` — flat dict of primary measurements for the CU formula
 - `benchmarks_completed` — which benchmarks ran successfully
-- `telemetry` — loaded CSV rows + per-stage thermal profiles + throttle events
-- `integrity_sha256` — SHA256 of the report (covers telemetry + all measurements)
-- `detailed` — full data from each benchmark including timing percentiles + drift series
+- `integrity_sha256` — hash of the report for tamper detection
+- `detailed` — full data from each benchmark
 
 ## File Reference
 
@@ -291,7 +214,7 @@ bm-suite/
 ├── HARDWARE_COMMANDS.md       ← NVIDIA vs AMD command reference (discover/lock/monitor/unlock)
 ├── bench/
 │   ├── _common.py             ← shared runtime: RUN_ID, RESULTS_DIR, write_result(), VRAM budget
-│   ├── preflight.py           ← [0] detect platform, discover specs, lock clocks/power
+│   ├── preflight.sh           ← [0] detect platform, discover specs, lock clocks/power
 │   ├── telemetry.sh           ← [1] background temp/power/clock CSV logger (1 Hz)
 │   ├── thermal_gate.py        ← [2] sustained GEMM until thermal steady state
 │   ├── gemm.py                ← [3] FP32/FP16/BF16/FP8 throughput via matrix multiply
@@ -299,23 +222,10 @@ bm-suite/
 │   ├── vram.py                ← [5] binary search allocation with context accounting
 │   ├── interconnect.sh        ← [6] NCCL/RCCL all_reduce bus bandwidth
 │   ├── inference.py           ← [7] vLLM Mtok/hr (optional)
-│   ├── report.py              ← merges all results, loads telemetry, integrity seal
-│   ├── plot.py                ← auto-generates PNG charts + summary.html
-│   ├── run_all.sh             ← orchestrator: runs [0]-[9] in sequence
+│   ├── report.py              ← merges all results into benchmark_report.json
+│   ├── run_all.sh             ← orchestrator: runs [0]-[7] in sequence
 │   └── find_sustained_clock.py ← utility: find steady-state clock for Blackwell/consumer GPUs
 └── results/                   ← timestamped run directories (gitignored)
-    └── run_{timestamp}/
-        ├── benchmark_report.json  ← primary output, SHA256-sealed
-        ├── telemetry.csv          ← 1Hz GPU temp/power/clock throughout run
-        ├── stage_events.csv       ← stage start/end timestamps for telemetry alignment
-        └── plots/
-            ├── summary.html       ← all charts in one page
-            ├── telemetry_overview.png
-            ├── gemm_tflops.png
-            ├── gemm_drift_{fp32,fp16,bf16,fp8}.png
-            ├── membw.png
-            ├── vram.png
-            └── interconnect.png
 ```
 
 ## Running Alongside Other GPU Workloads

@@ -14,18 +14,18 @@ After=network.target
 
 [Service]
 Type=simple
-User=bearj
-WorkingDirectory=/home/bearj/cu-bench
-ExecStart=/bin/bash /home/bearj/cu-bench/receive.sh
+User=b
+WorkingDirectory=/home/b/projects/cm/cu-bench
+ExecStart=/bin/bash /home/b/projects/cm/cu-bench/receive.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 # Environment overrides (edit these to match your layout)
-Environment=CU_INBOX=/home/bearj/cu-bench/inbox
-Environment=CU_ARCHIVE=/home/bearj/cu-bench/archive
-Environment=CU_LOGS=/home/bearj/cu-bench/logs
+Environment=CU_INBOX=/home/b/projects/cm/cu-bench/inbox
+Environment=CU_ARCHIVE=/home/b/projects/cm/cu-bench/archive
+Environment=CU_LOGS=/home/b/projects/cm/cu-bench/logs
 
 [Install]
 WantedBy=multi-user.target

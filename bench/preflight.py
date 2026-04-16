@@ -53,71 +53,6 @@ def nvidia_lock(args, label):
         return False
 
 
-def parse_nvlink_topology(raw):
-    """Parse nvidia-smi topo -m matrix into structured connections list.
-
-    Returns list of {from_gpu, to_gpu, link_type, nvlink_count} dicts,
-    or {parsed: False, raw: raw} if the matrix cannot be parsed.
-
-    Link type codes from nvidia-smi: NV1..NV18 = NVLink gen/count,
-    PHB = PCIe-Host Bridge, NODE = NUMA node, SYS = cross-socket.
-    """
-    try:
-        lines = [l for l in raw.splitlines() if l.strip()]
-        # Find header row — starts with GPU\t or contains "GPU0"
-        header_idx = None
-        for i, line in enumerate(lines):
-            if line.strip().startswith("GPU") and "\t" in line:
-                header_idx = i
-                break
-        if header_idx is None:
-            return {"parsed": False, "raw": raw}
-
-        # Parse header GPU indices: "GPU0\tGPU1\t..."
-        header_parts = lines[header_idx].strip().split("\t")
-        col_gpus = []
-        for p in header_parts:
-            p = p.strip()
-            if p.startswith("GPU"):
-                try:
-                    col_gpus.append(int(p[3:]))
-                except ValueError:
-                    pass
-
-        connections = []
-        for line in lines[header_idx + 1:]:
-            parts = line.strip().split("\t")
-            if not parts or not parts[0].startswith("GPU"):
-                continue
-            try:
-                from_gpu = int(parts[0][3:].split()[0])
-            except (ValueError, IndexError):
-                continue
-            for col_idx, link in enumerate(parts[1:len(col_gpus) + 1]):
-                link = link.strip()
-                if col_idx >= len(col_gpus):
-                    break
-                to_gpu = col_gpus[col_idx]
-                if from_gpu == to_gpu or link in ("", "X", "-"):
-                    continue
-                # Count NVLink lanes (NV4 → 4 lanes, NV12 → 12, etc.)
-                nvlink_count = None
-                if link.startswith("NV"):
-                    try:
-                        nvlink_count = int(link[2:])
-                    except ValueError:
-                        pass
-                connections.append({
-                    "from_gpu": from_gpu,
-                    "to_gpu": to_gpu,
-                    "link_type": link,
-                    "nvlink_count": nvlink_count,
-                })
-        return {"parsed": True, "connections": connections, "raw": raw}
-    except Exception as e:
-        return {"parsed": False, "error": str(e), "raw": raw}
-
-
 def detect_platform():
     """Detect GPU platform."""
     if run(["nvidia-smi", "-L"]):
@@ -194,9 +129,7 @@ def discover_nvidia():
     env["gpu_serials"] = nvidia_query("serial", nounits=False) or "N/A"
 
     # Topology — NVLink mesh and PCIe mapping (patent: Claim 27 full-mesh evidence)
-    topo_raw = run(["nvidia-smi", "topo", "-m"]) or "N/A"
-    env["nvlink_topology_raw"] = topo_raw
-    env["nvlink_topology"] = parse_nvlink_topology(topo_raw)
+    env["nvlink_topology"] = run(["nvidia-smi", "topo", "-m"]) or "N/A"
     env["nvlink_status"] = run(["nvidia-smi", "nvlink", "-s"]) or "N/A"
 
     # ─── Display header ───

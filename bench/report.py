@@ -4,7 +4,6 @@
 Merges all benchmark results into a single report with integrity hash.
 Can be run standalone after individual benchmarks, or as the final step in run_all.sh.
 """
-import csv
 import json
 import hashlib
 import os
@@ -29,127 +28,6 @@ def load_json(filename):
     return None
 
 
-def _parse_ts(ts_str):
-    """Parse nvidia-smi or ISO-8601 timestamp to datetime (UTC)."""
-    ts_str = ts_str.strip()
-    for fmt in ("%Y/%m/%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
-            return datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
-
-
-def load_telemetry():
-    """Load telemetry.csv → list of row dicts. Returns [] if missing."""
-    path = os.path.join(RESULTS_DIR, "telemetry.csv")
-    if not os.path.exists(path):
-        return []
-    rows = []
-    try:
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Strip whitespace from keys and values (nvidia-smi pads with spaces)
-                clean = {k.strip(): v.strip() for k, v in row.items() if k}
-                ts = _parse_ts(clean.get("timestamp", ""))
-                if ts:
-                    clean["_ts"] = ts
-                    rows.append(clean)
-    except Exception:
-        pass
-    return rows
-
-
-def load_stage_events():
-    """Load stage_events.csv → dict of {stage_name: {start_ts, end_ts, exit_code}}."""
-    path = os.path.join(RESULTS_DIR, "stage_events.csv")
-    if not os.path.exists(path):
-        return {}
-    stages = {}
-    try:
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = row.get("stage_name", "").strip()
-                event = row.get("event", "").strip()
-                ts = _parse_ts(row.get("timestamp_utc", ""))
-                if not name or not ts:
-                    continue
-                if name not in stages:
-                    stages[name] = {}
-                if event == "start":
-                    stages[name]["start_ts"] = ts
-                elif event == "end":
-                    stages[name]["end_ts"] = ts
-                    stages[name]["exit_code"] = int(row.get("exit_code", "0") or "0")
-    except Exception:
-        pass
-    return stages
-
-
-def compute_thermal_profiles(telemetry_rows, stage_events):
-    """For each stage, extract min/max/mean of temp/power/clock from telemetry rows
-    that fall within [start_ts, end_ts]. Also detect throttle events."""
-    profiles = {}
-    MEASUREMENT_STAGES = {"gemm", "membw", "vram", "interconnect", "inference"}
-
-    for stage_name, bounds in stage_events.items():
-        start_ts = bounds.get("start_ts")
-        end_ts = bounds.get("end_ts")
-        if not start_ts or not end_ts:
-            continue
-
-        window = [r for r in telemetry_rows if r.get("_ts") and start_ts <= r["_ts"] <= end_ts]
-        if not window:
-            profiles[stage_name] = {"sample_count": 0}
-            continue
-
-        def col_floats(key):
-            vals = []
-            for r in window:
-                try:
-                    vals.append(float(r.get(key, "") or ""))
-                except ValueError:
-                    pass
-            return vals
-
-        def stats(vals):
-            if not vals:
-                return None
-            return {"min": round(min(vals), 1), "max": round(max(vals), 1),
-                    "mean": round(sum(vals) / len(vals), 1)}
-
-        profile = {
-            "sample_count": len(window),
-            "duration_s": round((end_ts - start_ts).total_seconds(), 1),
-            "temp_c": stats(col_floats("temp_c")),
-            "power_w": stats(col_floats("power_w")),
-            "clock_gpu_mhz": stats(col_floats("clock_gpu_mhz")),
-        }
-
-        # Throttle detection — only flag during measurement stages
-        if stage_name in MEASUREMENT_STAGES:
-            throttle_events = []
-            for r in window:
-                reason = r.get("throttle_reasons", "").strip()
-                if reason and reason.lower() not in ("no active throttle reasons", "0x0000000000000000", ""):
-                    throttle_events.append({
-                        "ts": r["_ts"].isoformat(),
-                        "reason": reason,
-                        "clock_mhz": r.get("clock_gpu_mhz", ""),
-                    })
-            if throttle_events:
-                profile["throttle_events"] = throttle_events
-                profile["throttled"] = True
-            else:
-                profile["throttled"] = False
-
-        profiles[stage_name] = profile
-
-    return profiles
-
-
 def main():
     print_header("Report Compiler", f"Scanning: {RESULTS_DIR}")
 
@@ -171,22 +49,6 @@ def main():
         else:
             found.append(f"[dim]{name} (missing)[/]")
     console.print(f"  Found: {', '.join(found)}")
-
-    # Load telemetry + stage events
-    telemetry_rows = load_telemetry()
-    stage_events = load_stage_events()
-    thermal_profiles = compute_thermal_profiles(telemetry_rows, stage_events)
-
-    telemetry_summary = {
-        "row_count": len(telemetry_rows),
-        "stages_tracked": len(stage_events),
-        "telemetry_loaded": len(telemetry_rows) > 0,
-    }
-    if telemetry_rows:
-        console.print(f"  Telemetry: [green]{len(telemetry_rows)} rows[/] | "
-                      f"{len(stage_events)} stages | {len(thermal_profiles)} profiles")
-    else:
-        console.print("  [dim]Telemetry: not found (telemetry.csv missing)[/]")
 
     # ─── Extract primary measurements ───
     measured = {}
@@ -230,24 +92,6 @@ def main():
     measured["inference_model_weight_gb"] = eff_cal.get("weight_bytes_gb")
 
     # ─── Build report ───
-    # Serialize telemetry rows (strip internal _ts datetime objects)
-    telemetry_serializable = [
-        {k: v for k, v in r.items() if k != "_ts"}
-        for r in telemetry_rows
-    ]
-    # Serialize thermal_profiles (convert any datetime objects to ISO strings)
-    def _serialize_profiles(profiles):
-        result = {}
-        for stage, prof in profiles.items():
-            clean_prof = {}
-            for k, v in prof.items():
-                if k == "throttle_events":
-                    clean_prof[k] = v  # already serialized inside compute_thermal_profiles
-                else:
-                    clean_prof[k] = v
-            result[stage] = clean_prof
-        return result
-
     report = {
         "cu_bench_version": "1.0.0",
         "run_id": RUN_ID,
@@ -263,16 +107,6 @@ def main():
             ("warmup", warmup), ("gemm", gemm), ("membw", membw),
             ("vram", vram), ("interconnect", interconnect), ("inference", inference),
         ] if data and not data.get("skipped")],
-        "telemetry": {
-            "summary": telemetry_summary,
-            "stage_events": {k: {
-                "start_ts": v.get("start_ts").isoformat() if v.get("start_ts") else None,
-                "end_ts": v.get("end_ts").isoformat() if v.get("end_ts") else None,
-                "exit_code": v.get("exit_code"),
-            } for k, v in stage_events.items()},
-            "thermal_profiles": _serialize_profiles(thermal_profiles),
-            "rows": telemetry_serializable,
-        },
         "detailed": {
             "gemm": gemm,
             "membw": membw,
