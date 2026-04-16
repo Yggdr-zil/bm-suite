@@ -77,9 +77,13 @@ def compute_ecu_scores(measured: dict) -> dict:
         fp_ratio_tcu = 0.78 * fp16_r + 0.22 * fp32_r
         fp_ratio_icu = 0.78 * fp16_r + 0.22 * fp32_r  # same fallback for both
 
-    # Other ratios
-    bw_r = membw / REF["membw"]
-    vr_r = vram / REF["vram"]
+    # Floor fp ratios to avoid zero in geometric mean
+    fp_ratio_tcu = max(fp_ratio_tcu, 0.001)
+    fp_ratio_icu = max(fp_ratio_icu, 0.001)
+
+    # Other ratios (0.001 floor prevents ZeroDivisionError in harmonic mean)
+    bw_r = max(membw / REF["membw"], 0.001)
+    vr_r = max(vram / REF["vram"], 0.001)
     ic_r = max(ic_bw / REF["ic_bw"], 0.001)
 
     # eTCU: compute-bound score

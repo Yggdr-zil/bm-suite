@@ -90,6 +90,49 @@ def test_no_fp8_fallback():
     assert result["fp8_fallback_used"] is True
 
 
+def test_fp8_zero_integer_triggers_fallback():
+    """FP8 = 0 (integer, not None) should trigger the no-FP8 fallback path."""
+    measured = {
+        "fp16_tflops": 989.5,
+        "fp8_tflops": 0,
+        "fp32_tflops": 67.0,
+        "vram_usable_gb": 80.0,
+        "membw_gbps": 3350.0,
+        "interconnect_bw_gbps": 900.0,
+    }
+    result = compute_ecu_scores(measured)
+    assert result["fp8_fallback_used"] is True
+    assert result["eTCU"] > 0, "eTCU must be positive"
+    assert result["eICU"] > 0, "eICU must be positive"
+    assert result["eCU"] > 0, "eCU must be positive"
+
+
+def test_missing_keys_minimal_dict():
+    """A minimal dict missing most keys should not crash; scores should be positive."""
+    measured = {"fp16_tflops": 100.0}
+    result = compute_ecu_scores(measured)
+    assert result["eTCU"] > 0, "eTCU must be positive"
+    assert result["eICU"] > 0, "eICU must be positive"
+    assert result["eCU"] > 0, "eCU must be positive"
+    assert result["fp8_fallback_used"] is True  # fp8 missing → fallback
+
+
+def test_zero_membw_and_vram_no_crash():
+    """Zero membw and vram should not cause ZeroDivisionError."""
+    measured = {
+        "fp16_tflops": 100.0,
+        "fp8_tflops": 200.0,
+        "fp32_tflops": 10.0,
+        "vram_usable_gb": 0,
+        "membw_gbps": 0,
+        "interconnect_bw_gbps": 0,
+    }
+    result = compute_ecu_scores(measured)
+    assert result["eTCU"] > 0, "eTCU must be positive with 0.001 floor"
+    assert result["eICU"] > 0, "eICU must be positive with 0.001 floor"
+    assert result["eCU"] > 0, "eCU must be positive with 0.001 floor"
+
+
 def test_score_appended_to_report():
     """score_report() reads report JSON, appends ecu_scores section, and re-seals hash."""
     # Build a minimal but valid report
