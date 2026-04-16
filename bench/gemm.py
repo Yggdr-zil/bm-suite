@@ -18,6 +18,7 @@ from rich.table import Table
 
 from _common import RESULTS_DIR, write_result, console, print_header, check_vram_ok
 
+WORKER_TIMEOUT = int(os.environ.get("CU_WORKER_TIMEOUT", "600"))
 MATRIX_DIM = int(os.environ.get("CU_GEMM_DIM", "8192"))
 WARMUP_ITERS = int(os.environ.get("CU_GEMM_WARMUP", "20"))
 BENCH_ITERS = int(os.environ.get("CU_GEMM_ITERS", "200"))
@@ -252,16 +253,22 @@ def _gpu_worker(gpu_id, barrier, result_dict, precisions, M, N, K, warmup, iters
     gpu_results = {}
 
     for key, dtype, label in precisions:
-        if barrier is not None:
-            barrier.wait()
-        r = bench_gemm(M, N, K, dtype, f"GPU{gpu_id} {label}",
-                       warmup=warmup, iters=iters, device_id=gpu_id)
+        try:
+            if barrier is not None:
+                barrier.wait(timeout=300)
+            r = bench_gemm(M, N, K, dtype, f"GPU{gpu_id} {label}",
+                           warmup=warmup, iters=iters, device_id=gpu_id)
+        except Exception as e:
+            r = None
         gpu_results[key] = r
 
     # FP8
-    if barrier is not None:
-        barrier.wait()
-    r = bench_gemm_fp8(M, N, K, warmup=warmup, iters=iters, device_id=gpu_id)
+    try:
+        if barrier is not None:
+            barrier.wait(timeout=300)
+        r = bench_gemm_fp8(M, N, K, warmup=warmup, iters=iters, device_id=gpu_id)
+    except Exception as e:
+        r = None
     gpu_results["fp8"] = r
 
     result_dict[gpu_id] = gpu_results
@@ -302,14 +309,14 @@ def _run_multi_gpu(precisions, M, N, K, warmup, iters, gpu_count, gpu_map):
         return per_gpu
 
     # Multi-GPU path: spawn workers with barrier sync
-    mp.set_start_method("spawn", force=True)
-    manager = mp.Manager()
+    ctx = mp.get_context("spawn")
+    manager = ctx.Manager()
     result_dict = manager.dict()
-    barrier = mp.Barrier(gpu_count)
+    barrier = ctx.Barrier(gpu_count)
 
     processes = []
     for i in range(gpu_count):
-        p = mp.Process(
+        p = ctx.Process(
             target=_gpu_worker,
             args=(i, barrier, result_dict, precisions, M, N, K, warmup, iters),
         )
@@ -317,7 +324,18 @@ def _run_multi_gpu(precisions, M, N, K, warmup, iters, gpu_count, gpu_map):
         p.start()
 
     for p in processes:
-        p.join()
+        p.join(timeout=WORKER_TIMEOUT)
+
+    failed = []
+    for i, p in enumerate(processes):
+        if p.exitcode is None:
+            console.print(f"  [red]GPU{i} worker timed out — terminating[/]")
+            p.terminate()
+            p.join(timeout=10)
+            failed.append(i)
+        elif p.exitcode != 0:
+            console.print(f"  [red]GPU{i} worker crashed (exit={p.exitcode})[/]")
+            failed.append(i)
 
     # Build per_gpu dict with silicon_ids
     per_gpu = {}

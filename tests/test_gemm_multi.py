@@ -127,3 +127,17 @@ def test_no_env_json_still_works():
         assert "gpu_count" in data
         # per_gpu should still exist
         assert "per_gpu" in data
+
+
+def test_aggregate_cluster_sums_tflops():
+    """Test cluster aggregation logic without GPU hardware."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bench'))
+    from gemm import _aggregate_cluster
+
+    per_gpu = {
+        "gpu0": {"silicon_id": "A", "fp16": {"tflops": 100.0, "avg_ms": 1.0, "median_ms": 1.0, "min_ms": 0.9, "max_ms": 1.1, "std_ms": 0.05, "cv_pct": 5.0, "raw_avg_ms": 1.0, "trimmed_samples": 190, "total_samples": 200, "trim_pct": 5.0, "matrix_dim": 8192, "warmup_iters": 20, "bench_iters": 200}},
+        "gpu1": {"silicon_id": "B", "fp16": {"tflops": 98.0, "avg_ms": 1.02, "median_ms": 1.02, "min_ms": 0.92, "max_ms": 1.12, "std_ms": 0.05, "cv_pct": 5.0, "raw_avg_ms": 1.02, "trimmed_samples": 190, "total_samples": 200, "trim_pct": 5.0, "matrix_dim": 8192, "warmup_iters": 20, "bench_iters": 200}},
+    }
+    result = _aggregate_cluster(per_gpu, ["fp16", "fp32", "bf16", "fp8"])
+    assert result["fp16"]["cluster_tflops"] == 198.0
+    assert result["fp16"]["tflops"] == 99.0  # average
