@@ -53,12 +53,20 @@ def main():
     # ─── Extract primary measurements ───
     measured = {}
 
+    # GPU count from environment
+    measured["gpu_count"] = env.get("gpu_count", 1)
+
+    # GEMM: prefer cluster_tflops (multi-GPU aggregate) over single-GPU tflops
     for prec in ["fp32", "fp16", "bf16", "fp8"]:
         val = gemm.get(prec)
-        measured[f"{prec}_tflops"] = val.get("tflops") if val and isinstance(val, dict) else None
+        if val and isinstance(val, dict):
+            measured[f"{prec}_tflops"] = val.get("cluster_tflops", val.get("tflops"))
+        else:
+            measured[f"{prec}_tflops"] = None
 
+    # MemBW: prefer cluster_gbps (multi-GPU aggregate) over single-GPU gbps
     bw = membw.get("clone_large") or membw.get("clone_primary") or {}
-    measured["membw_gbps"] = bw.get("gbps")
+    measured["membw_gbps"] = bw.get("cluster_gbps", bw.get("gbps"))
 
     vram_gpus = vram.get("gpus", {})
     measured["vram_usable_gb"] = vram.get("total_verified_gb")
