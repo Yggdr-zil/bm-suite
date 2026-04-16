@@ -76,8 +76,10 @@ source "${RESULTS_DIR}/_platform.sh"
 # ─── Cleanup on exit/cancel (Ctrl+C) ───
 cleanup() {
     echo -e "\nCleaning up..."
+    # Kill WS sender first (before clock unlock which may hang)
+    [ -n "${WS_PID:-}" ] && kill "$WS_PID" 2>/dev/null && wait "$WS_PID" 2>/dev/null
     # Kill telemetry
-    [ -n "${TELEMETRY_PID:-}" ] && kill $TELEMETRY_PID 2>/dev/null && wait $TELEMETRY_PID 2>/dev/null
+    [ -n "${TELEMETRY_PID:-}" ] && kill "$TELEMETRY_PID" 2>/dev/null && wait "$TELEMETRY_PID" 2>/dev/null
     # Unlock clocks
     if [ "${PLATFORM:-nvidia}" = "nvidia" ]; then
         nvidia-smi -rgc >/dev/null 2>&1 || true
@@ -87,8 +89,6 @@ cleanup() {
         rocm-smi -r 2>/dev/null || true
         echo "GPU reset."
     fi
-    # Kill WS sender
-    [ -n "${WS_PID:-}" ] && kill $WS_PID 2>/dev/null && wait $WS_PID 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -184,11 +184,11 @@ echo "  Results: $RUN_DIR/benchmark_report.json"
 python3 -c "
 import json, sys
 try:
-    r = json.load(open('${RUN_DIR}/benchmark_report.json'))
+    r = json.load(open(sys.argv[1]))
     s = r.get('ecu_scores', {})
     if s:
         print(f'  eTCU={s.get(\"eTCU\", s.get(\"etcu\", \"?\"))}  eICU={s.get(\"eICU\", s.get(\"eicu\", \"?\"))}  eCU={s.get(\"eCU\", s.get(\"ecu\", \"?\"))}')
         print(f'  Reference: {s.get(\"reference_gpu\", \"?\")}')
 except: pass
-" 2>/dev/null || true
+" "$RUN_DIR/benchmark_report.json" 2>/dev/null || true
 echo "================================================================"
