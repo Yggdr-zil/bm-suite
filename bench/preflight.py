@@ -128,6 +128,33 @@ def discover_nvidia():
     # Serials
     env["gpu_serials"] = nvidia_query("serial", nounits=False) or "N/A"
 
+    # Per-GPU identity map — keyed by gpu{N}, valued with silicon ID
+    gpu_map = {}
+    try:
+        raw = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,serial,uuid,name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True
+        ).stdout.strip()
+        for line in raw.split("\n"):
+            parts = [p.strip() for p in line.split(",", 3)]
+            if len(parts) >= 4:
+                idx = int(parts[0])
+                gpu_map[f"gpu{idx}"] = {
+                    "index": idx,
+                    "serial": parts[1] if parts[1] != "0" else None,
+                    "uuid": parts[2],
+                    "name": parts[3],
+                }
+    except Exception:
+        gpu_map["gpu0"] = {
+            "index": 0,
+            "serial": None,
+            "uuid": "unknown",
+            "name": env.get("gpu_model", "unknown"),
+        }
+    env["gpu_map"] = gpu_map
+
     # Topology — NVLink mesh and PCIe mapping (patent: Claim 27 full-mesh evidence)
     env["nvlink_topology"] = run(["nvidia-smi", "topo", "-m"]) or "N/A"
     env["nvlink_status"] = run(["nvidia-smi", "nvlink", "-s"]) or "N/A"
@@ -246,6 +273,20 @@ def discover_amd():
     env["power_limit_watts"] = 750
     env["start_temp_c"] = 0
     env["gpu_serials"] = "N/A"
+
+    # Per-GPU identity map
+    gpu_map = {}
+    try:
+        for i in range(gpu_count):
+            gpu_map[f"gpu{i}"] = {
+                "index": i,
+                "serial": None,
+                "uuid": run(["rocm-smi", "-d", str(i), "--showuniqueid"]) or "unknown",
+                "name": env.get("gpu_model", "unknown"),
+            }
+    except Exception:
+        gpu_map["gpu0"] = {"index": 0, "serial": None, "uuid": "unknown", "name": "unknown"}
+    env["gpu_map"] = gpu_map
 
     # Topology — xGMI link bandwidth + supported clock levels (methodology §HMI query)
     env["gpu_clocks_sclk"] = run(["rocm-smi", "--showclk", "sclk"]) or "N/A"
