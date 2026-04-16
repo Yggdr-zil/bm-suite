@@ -7,7 +7,9 @@ Method: Square matrix multiply (M=N=K=8192) saturates tensor cores.
 TFLOPS = 2 * M * N * K / time / 1e12
 """
 import torch
+import torch.multiprocessing as mp
 import time
+import json
 import os
 import sys
 
@@ -23,14 +25,14 @@ BENCH_ITERS = int(os.environ.get("CU_GEMM_ITERS", "200"))
 TRIM_PCT = float(os.environ.get("CU_GEMM_TRIM_PCT", "5"))
 
 
-def bench_gemm(M, N, K, dtype, label, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
+def bench_gemm(M, N, K, dtype, label, warmup=WARMUP_ITERS, iters=BENCH_ITERS, device_id=0):
     """Run GEMM benchmark for a given precision."""
-    device = torch.device("cuda")
+    device = torch.device(f"cuda:{device_id}")
 
     # Check VRAM budget before allocating (2 matrices + 1 output)
     elem_bytes = torch.finfo(dtype).bits // 8
     needed = (M * K + K * N + M * N) * elem_bytes
-    if not check_vram_ok(needed, label):
+    if not check_vram_ok(needed, label, device_idx=device_id):
         return None
 
     try:
@@ -118,13 +120,13 @@ def bench_gemm(M, N, K, dtype, label, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
     return result
 
 
-def bench_gemm_fp8(M, N, K, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
+def bench_gemm_fp8(M, N, K, warmup=WARMUP_ITERS, iters=BENCH_ITERS, device_id=0):
     """FP8 GEMM uses torch._scaled_mm (Hopper+/Blackwell only)."""
-    device = torch.device("cuda")
+    device = torch.device(f"cuda:{device_id}")
 
     # FP8 needs intermediate FP16 + FP8 copies — budget ~4 bytes/element
     needed = (M * K + K * N + M * N) * 4
-    if not check_vram_ok(needed, "FP8"):
+    if not check_vram_ok(needed, "FP8", device_idx=device_id):
         return None
 
     try:
@@ -213,19 +215,175 @@ def bench_gemm_fp8(M, N, K, warmup=WARMUP_ITERS, iters=BENCH_ITERS):
         return None
 
 
+def _load_gpu_map():
+    """Load gpu_map from 00_environment.json written by preflight.py.
+
+    Returns (gpu_count, gpu_map) where gpu_map is a dict keyed by 'gpu0', 'gpu1', etc.
+    Falls back to torch.cuda.device_count() with synthetic map if file is missing.
+    """
+    env_path = os.path.join(RESULTS_DIR, "00_environment.json")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            env_data = json.load(f)
+        gpu_count = env_data.get("gpu_count", torch.cuda.device_count())
+        gpu_map = env_data.get("gpu_map", {})
+        if gpu_map:
+            return gpu_count, gpu_map
+
+    # Fallback: build synthetic map from torch
+    gpu_count = torch.cuda.device_count()
+    gpu_map = {}
+    for i in range(gpu_count):
+        gpu_map[f"gpu{i}"] = {
+            "index": i,
+            "uuid": f"unknown-{i}",
+            "name": torch.cuda.get_device_name(i),
+            "serial": "unknown",
+        }
+    return gpu_count, gpu_map
+
+
+def _gpu_worker(gpu_id, barrier, result_dict, precisions, M, N, K, warmup, iters):
+    """Worker function for multi-GPU benchmarking.
+
+    Each worker benchmarks all precisions on its assigned GPU.
+    """
+    torch.cuda.set_device(gpu_id)
+    gpu_results = {}
+
+    for key, dtype, label in precisions:
+        if barrier is not None:
+            barrier.wait()
+        r = bench_gemm(M, N, K, dtype, f"GPU{gpu_id} {label}",
+                       warmup=warmup, iters=iters, device_id=gpu_id)
+        gpu_results[key] = r
+
+    # FP8
+    if barrier is not None:
+        barrier.wait()
+    r = bench_gemm_fp8(M, N, K, warmup=warmup, iters=iters, device_id=gpu_id)
+    gpu_results["fp8"] = r
+
+    result_dict[gpu_id] = gpu_results
+
+
+def _run_multi_gpu(precisions, M, N, K, warmup, iters, gpu_count, gpu_map):
+    """Orchestrate GEMM benchmarks across all GPUs.
+
+    Single GPU: runs directly, no multiprocessing overhead.
+    Multi GPU: spawns one worker per GPU with barrier sync.
+
+    Returns per_gpu dict (keyed by 'gpu0', etc.) with silicon_id and precision results.
+    """
+    if gpu_count == 1:
+        # Single GPU — no multiprocessing, run directly
+        gpu_results = {}
+        for key, dtype, label in precisions:
+            r = bench_gemm(M, N, K, dtype, label, warmup=warmup, iters=iters, device_id=0)
+            gpu_results[key] = r
+            if r:
+                method = f" [yellow](median, CV={r['cv_pct']}%)[/]" if r.get("tflops_method") == "median" else ""
+                console.print(f"  [bold green]{label}:[/] {r['tflops']} TFLOPS  [dim]({r['avg_ms']:.2f} ms avg)[/]{method}")
+
+        r = bench_gemm_fp8(M, N, K, warmup=warmup, iters=iters, device_id=0)
+        gpu_results["fp8"] = r
+        if r:
+            method = f" [yellow](median, CV={r['cv_pct']}%)[/]" if r.get("tflops_method") == "median" else ""
+            console.print(f"  [bold green]FP8:[/]  {r['tflops']} TFLOPS  [dim]({r['avg_ms']:.2f} ms avg)[/]{method}")
+
+        # Build per_gpu with silicon_id
+        gpu0_info = gpu_map.get("gpu0", {})
+        per_gpu = {
+            "gpu0": {
+                "silicon_id": gpu0_info.get("uuid", "unknown"),
+                **gpu_results,
+            }
+        }
+        return per_gpu
+
+    # Multi-GPU path: spawn workers with barrier sync
+    mp.set_start_method("spawn", force=True)
+    manager = mp.Manager()
+    result_dict = manager.dict()
+    barrier = mp.Barrier(gpu_count)
+
+    processes = []
+    for i in range(gpu_count):
+        p = mp.Process(
+            target=_gpu_worker,
+            args=(i, barrier, result_dict, precisions, M, N, K, warmup, iters),
+        )
+        processes.append(p)
+        p.start()
+
+    for p in processes:
+        p.join()
+
+    # Build per_gpu dict with silicon_ids
+    per_gpu = {}
+    for i in range(gpu_count):
+        gpu_key = f"gpu{i}"
+        gpu_info = gpu_map.get(gpu_key, {})
+        gpu_results = dict(result_dict.get(i, {}))
+        per_gpu[gpu_key] = {
+            "silicon_id": gpu_info.get("uuid", "unknown"),
+            **gpu_results,
+        }
+
+    return per_gpu
+
+
+def _aggregate_cluster(per_gpu, precision_keys):
+    """Build top-level precision results with cluster_tflops from per_gpu data.
+
+    For each precision, picks gpu0's result as the representative (for top-level
+    avg_ms, median_ms, etc.) and sums tflops across all GPUs for cluster_tflops.
+
+    Returns dict keyed by precision with cluster_tflops added.
+    """
+    aggregated = {}
+    for key in precision_keys:
+        # Collect all non-None results for this precision
+        gpu_results = []
+        for gpu_key in sorted(per_gpu.keys()):
+            gpu_data = per_gpu[gpu_key]
+            r = gpu_data.get(key)
+            if r is not None:
+                gpu_results.append(r)
+
+        if not gpu_results:
+            aggregated[key] = None
+            continue
+
+        # Use gpu0's result as representative, add cluster_tflops
+        representative = dict(gpu_results[0])
+        cluster_tflops = round(sum(r["tflops"] for r in gpu_results), 2)
+        representative["cluster_tflops"] = cluster_tflops
+
+        # For multi-GPU, tflops is the average per-GPU tflops
+        if len(gpu_results) > 1:
+            representative["tflops"] = round(
+                sum(r["tflops"] for r in gpu_results) / len(gpu_results), 2
+            )
+
+        aggregated[key] = representative
+    return aggregated
+
+
 def main():
     if not torch.cuda.is_available():
         console.print("[red]No CUDA device. Skipping GEMM benchmark.[/]")
         sys.exit(0)
 
     device_name = torch.cuda.get_device_name(0)
+    gpu_count, gpu_map = _load_gpu_map()
+
     print_header(
         f"{device_name}",
-        f"Matrix: {MATRIX_DIM}x{MATRIX_DIM} | Warmup: {WARMUP_ITERS} | Iters: {BENCH_ITERS}",
+        f"Matrix: {MATRIX_DIM}x{MATRIX_DIM} | Warmup: {WARMUP_ITERS} | Iters: {BENCH_ITERS} | GPUs: {gpu_count}",
     )
 
     M = N = K = MATRIX_DIM
-    results = {"device": device_name, "matrix_dim": M}
 
     precisions = [
         ("fp32", torch.float32, "FP32"),
@@ -233,24 +391,38 @@ def main():
         ("bf16", torch.bfloat16, "BF16"),
     ]
 
-    for key, dtype, label in precisions:
-        r = bench_gemm(M, N, K, dtype, label)
-        results[key] = r
-        if r:
-            method = f" [yellow](median, CV={r['cv_pct']}%)[/]" if r.get("tflops_method") == "median" else ""
-            console.print(f"  [bold green]{label}:[/] {r['tflops']} TFLOPS  [dim]({r['avg_ms']:.2f} ms avg)[/]{method}")
+    per_gpu = _run_multi_gpu(precisions, M, N, K, WARMUP_ITERS, BENCH_ITERS, gpu_count, gpu_map)
 
-    # FP8
-    r = bench_gemm_fp8(M, N, K)
-    results["fp8"] = r
-    if r:
-        method = f" [yellow](median, CV={r['cv_pct']}%)[/]" if r.get("tflops_method") == "median" else ""
-        console.print(f"  [bold green]FP8:[/]  {r['tflops']} TFLOPS  [dim]({r['avg_ms']:.2f} ms avg)[/]{method}")
+    # Aggregate cluster-level results
+    precision_keys = [key for key, _, _ in precisions] + ["fp8"]
+    aggregated = _aggregate_cluster(per_gpu, precision_keys)
+
+    # Build output
+    results = {
+        "device": device_name,
+        "matrix_dim": M,
+        "gpu_count": gpu_count,
+    }
+    results.update(aggregated)
+    results["per_gpu"] = per_gpu
+
+    # Multi-GPU: print summary (single-GPU already printed inline)
+    if gpu_count > 1:
+        for key, _, label in precisions + [("fp8", None, "FP8")]:
+            r = aggregated.get(key)
+            if r:
+                method = f" [yellow](median, CV={r['cv_pct']}%)[/]" if r.get("tflops_method") == "median" else ""
+                console.print(
+                    f"  [bold green]{label}:[/] {r['cluster_tflops']} TFLOPS (cluster)  "
+                    f"[dim]({r['tflops']} avg/GPU)[/]{method}"
+                )
 
     # Summary table
     table = Table(title="\nGEMM Results", show_lines=True, border_style="cyan")
     table.add_column("Precision", style="bold")
     table.add_column("TFLOPS", justify="right", style="green")
+    if gpu_count > 1:
+        table.add_column("Cluster", justify="right", style="bold green")
     table.add_column("Median ms", justify="right", style="dim")
     table.add_column("Avg ms", justify="right", style="dim")
     table.add_column("CV%", justify="right")
@@ -262,10 +434,21 @@ def main():
             cv = r.get("cv_pct", 0)
             cv_style = "red" if cv > 5.0 else "yellow" if cv > 2.0 else "green"
             method = r.get("tflops_method", "trimmed mean")
-            table.add_row(label, str(r["tflops"]), f"{r['median_ms']:.3f}",
-                          f"{r['avg_ms']:.3f}", f"[{cv_style}]{cv}[/]", method)
+            row = [label, str(r["tflops"])]
+            if gpu_count > 1:
+                row.append(str(r["cluster_tflops"]))
+            row.extend([
+                f"{r['median_ms']:.3f}",
+                f"{r['avg_ms']:.3f}",
+                f"[{cv_style}]{cv}[/]",
+                method,
+            ])
+            table.add_row(*row)
         else:
-            table.add_row(label, "[dim]skipped[/]", "", "", "", "")
+            empty = [""] * (6 if gpu_count == 1 else 7)
+            empty[0] = label
+            empty[1] = "[dim]skipped[/]"
+            table.add_row(*empty)
 
     console.print(table)
     write_result("01_gemm.json", results)
